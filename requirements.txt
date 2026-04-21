@@ -1,7 +1,7 @@
-fastapi
-uvicorn
-supabase
-numpy
-python-dotenv
-httpx
-pydantic
+fastapi==0.100.0
+uvicorn==0.23.0
+supabase==1.2.0
+numpy==1.24.0
+python-dotenv==1.0.0
+httpx==0.24.0
+pydantic==1.10.13
