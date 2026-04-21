@@ -16,90 +16,32 @@ class PRSRequest(BaseModel):
 
 class EventFeedback(BaseModel):
     user_id: str
-    actual_event: float  # 0.0 = nessun sinistro, 1.0 = sinistro avvenuto
+    actual_event: float
     predicted_score: float
     factors: dict
 
 
 @router.post("/compute")
 async def compute_user_prs(request: PRSRequest):
-    """
-    Calcola il PRS per un utente.
-    Recupera i pesi personalizzati, lo storico e la rete sociale.
-    """
     try:
-        # Recupera utente e pesi Bayesiani personalizzati
-        user_resp = supabase.table("users")\
-            .select("bayes_weights, bayes_variance")\
-            .eq("id", request.user_id)\
-            .single()\
-            .execute()
-
+        user_resp = supabase.table("users").select("bayes_weights, bayes_variance").eq("id", request.user_id).single().execute()
         if not user_resp.data:
             raise HTTPException(status_code=404, detail="Utente non trovato")
-
         weights = user_resp.data.get("bayes_weights", DEFAULT_WEIGHTS)
-
-        # Recupera ultimo PRS per inerzia temporale
-        history_resp = supabase.table("prs_history")\
-            .select("score")\
-            .eq("user_id", request.user_id)\
-            .order("computed_at", desc=True)\
-            .limit(1)\
-            .execute()
-
+        history_resp = supabase.table("prs_history").select("score").eq("user_id", request.user_id).order("computed_at", desc=True).limit(1).execute()
         previous_prs = None
         if history_resp.data:
             previous_prs = history_resp.data[0]["score"]
-
-        # Recupera connessioni sociali con consenso
         connections = []
         if request.include_network:
-            net_resp = supabase.table("social_connections")\
-                .select("connected_user_id, weight, consent_given")\
-                .eq("user_id", request.user_id)\
-                .eq("consent_given", True)\
-                .execute()
-
+            net_resp = supabase.table("social_connections").select("connected_user_id, weight, consent_given").eq("user_id", request.user_id).eq("consent_given", True).execute()
             for conn in (net_resp.data or []):
-                # Recupera ultimo PRS del contatto
-                conn_hist = supabase.table("prs_history")\
-                    .select("score")\
-                    .eq("user_id", conn["connected_user_id"])\
-                    .order("computed_at", desc=True)\
-                    .limit(1)\
-                    .execute()
-
+                conn_hist = supabase.table("prs_history").select("score").eq("user_id", conn["connected_user_id"]).order("computed_at", desc=True).limit(1).execute()
                 if conn_hist.data:
-                    connections.append({
-                        "consent_given": True,
-                        "weight": conn["weight"],
-                        "prs_score": conn_hist.data[0]["score"],
-                    })
-
-        # Calcola PRS
-        result = compute_prs(
-            factors=request.factors,
-            weights=weights,
-            previous_prs=previous_prs,
-            connections=connections,
-        )
-
-        # Salva in storico
-        supabase.table("prs_history").insert({
-            "user_id": request.user_id,
-            "score": result["score"],
-            "raw_factors": request.factors,
-            "network_contribution": result["network_contribution"],
-            "inertia_contribution": result["inertia_contribution"],
-        }).execute()
-
-        return {
-            "user_id": request.user_id,
-            "prs": result,
-            "weights_used": weights,
-        }
-
+                    connections.append({"consent_given": True, "weight": conn["weight"], "prs_score": conn_hist.data[0]["score"]})
+        result = compute_prs(factors=request.factors, weights=weights, previous_prs=previous_prs, connections=connections)
+        supabase.table("prs_history").insert({"user_id": request.user_id, "score": result["score"], "raw_factors": request.factors, "network_contribution": result["network_contribution"], "inertia_contribution": result["inertia_contribution"]}).execute()
+        return {"user_id": request.user_id, "prs": result, "weights_used": weights}
     except HTTPException:
         raise
     except Exception as e:
@@ -108,10 +50,25 @@ async def compute_user_prs(request: PRSRequest):
 
 @router.post("/feedback")
 async def update_weights(feedback: EventFeedback):
-    """
-    Aggiorna i pesi Bayesiani dell'utente dopo un evento reale.
-    Chiamato quando avviene un sinistro, rinnovo o disdetta.
-    """
     try:
-        user_resp = supabase.table("users")\
-            .select("bayes_weights, bayes_variance")\
+        user_resp = supabase.table("users").select("bayes_weights, bayes_variance").eq("id", feedback.user_id).single().execute()
+        if not user_resp.data:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        current_weights = user_resp.data["bayes_weights"]
+        current_variance = user_resp.data["bayes_variance"]
+        new_weights, new_variance = bayesian_update(current_weights=current_weights, current_variance=current_variance, actual_event=feedback.actual_event, predicted_score=feedback.predicted_score, factors=feedback.factors)
+        supabase.table("users").update({"bayes_weights": new_weights, "bayes_variance": new_variance}).eq("id", feedback.user_id).execute()
+        return {"user_id": feedback.user_id, "updated_weights": new_weights, "message": "Pesi aggiornati con successo"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/history/{user_id}")
+async def get_prs_history(user_id: str, limit: int = 10):
+    try:
+        resp = supabase.table("prs_history").select("*").eq("user_id", user_id).order("computed_at", desc=True).limit(limit).execute()
+        return {"user_id": user_id, "history": resp.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
