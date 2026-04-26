@@ -23,3 +23,7 @@ app.include_router(prs.router, prefix="/api/v1/prs", tags=["PRS"])
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "PRS Engine", "version": "1.0.0"}
+
+@app.get("/ping")
+async def ping():
+    return {"pong": True}
